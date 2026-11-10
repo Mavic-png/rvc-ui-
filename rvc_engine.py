@@ -144,6 +144,10 @@ class VoiceEngine:
         self.scope_seq = 0
         self.input_gain = 1.0
         self.output_gain = 1.0
+        self.eq_high_db = 0.0
+        self._eq_coeffs = None
+        self._eq_zi = None
+        self._eq_sr = 0
         self.block_frame = None
         self.block_frame_16k = None
         self.crossfade_frame = None
@@ -211,6 +215,55 @@ class VoiceEngine:
 
     def set_function(self, fn):
         self.function = fn if fn in ("vc", "im") else "vc"
+
+
+    def set_eq_high(self, db):
+        try:
+            db = float(db)
+        except Exception:
+            db = 0.0
+        self.eq_high_db = max(0.0, db)
+        self._eq_coeffs = None
+        self._eq_zi = None
+
+    def _design_high_shelf(self, sr, gain_db, f0=4500.0, q=0.707):
+        import math
+        amp = 10.0 ** (-abs(gain_db) / 40.0)
+        w0 = 2.0 * math.pi * f0 / float(sr)
+        cos_w0 = math.cos(w0)
+        alpha = math.sin(w0) / (2.0 * q)
+        beta = 2.0 * math.sqrt(amp) * alpha
+        a0 = (amp + 1) - (amp - 1) * cos_w0 + beta
+        b0 = amp * ((amp + 1) + (amp - 1) * cos_w0 + beta)
+        b1 = -2 * amp * ((amp - 1) + (amp + 1) * cos_w0)
+        b2 = amp * ((amp + 1) + (amp - 1) * cos_w0 - beta)
+        a1 = 2 * ((amp - 1) - (amp + 1) * cos_w0)
+        a2 = (amp + 1) - (amp - 1) * cos_w0 - beta
+        return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
+
+    def _apply_eq(self, outdata):
+        import numpy as np
+        from scipy.signal import lfilter
+        db = float(getattr(self, 'eq_high_db', 0.0) or 0.0)
+        if db <= 0.01:
+            return outdata
+        sr = int(getattr(self.cfg, 'samplerate', 0) or 0)
+        if sr <= 0:
+            return outdata
+        if self._eq_coeffs is None or self._eq_sr != sr or self._eq_zi is None:
+            self._eq_coeffs = self._design_high_shelf(sr, db)
+            self._eq_sr = sr
+            channels = outdata.shape[1] if outdata.ndim > 1 else 1
+            self._eq_zi = [np.zeros(2) for _ in range(channels)]
+        b, a = self._eq_coeffs
+        if outdata.ndim == 1:
+            outdata, z = lfilter(b, a, outdata, zi=self._eq_zi[0])
+            self._eq_zi[0] = z
+        else:
+            for ch in range(outdata.shape[1]):
+                outdata[:, ch], z = lfilter(b, a, outdata[:, ch], zi=self._eq_zi[ch])
+                self._eq_zi[ch] = z
+        return outdata
 
     def set_scope(self, enabled):
         self.show_scope = bool(enabled)

@@ -746,6 +746,10 @@ class Studio(QMainWindow):
         return row
 
     def _on_slider(self, key, raw):
+        if key == "eq_high":
+            if self.engine is not None:
+                self.engine.set_eq_high(raw)
+            return
         if self.engine is not None and key in ("input_gain", "output_gain"):
             self.engine.set_gain(
                 self.sliders["input_gain"].value() / 100.0,
@@ -769,12 +773,13 @@ class Studio(QMainWindow):
     def _params_card(self):
         f, lay = card("常规设置")
         lay.addLayout(self.slider_row("threhold", "响应阈值", -60, 0, -60, lambda v: str(v), " dB"))
-        lay.addLayout(self.slider_row("pitch", "音调", -16, 16, 13, lambda v: str(v), " st", True))
-        lay.addLayout(self.slider_row("formant", "声线粗细", -200, 200, 10,
+        lay.addLayout(self.slider_row("pitch", "音调", -24, 24, 13, lambda v: str(v), " st", True))
+        lay.addLayout(self.slider_row("formant", "声线粗细", -600, 600, 10,
                                       lambda v: "%.2f" % (v / 100), "", True))
         lay.addLayout(self.slider_row("index_rate", "检索占比", 0, 100, 0, lambda v: "%.2f" % (v / 100)))
         lay.addLayout(self.slider_row("rms_mix_rate", "响度因子", 0, 100, 26, lambda v: "%.2f" % (v / 100)))
         lay.addLayout(self.slider_row("deess", "齿音抑制", 0, 100, 30, lambda v: "%.2f" % (v / 100)))
+        lay.addLayout(self.slider_row("eq_high", "高音衰减", 0, 12, 0, lambda v: "%d" % v, " dB"))
         row = QHBoxLayout()
         row.setSpacing(14)
         lab = QLabel("音高算法")
@@ -1040,6 +1045,7 @@ class Studio(QMainWindow):
         eng.deesser_amount = values["deess"]
         eng.set_scope(self.chk_scope.isChecked())
         eng.set_function("im" if self.rb_monitor.isChecked() else "vc")
+        eng.set_eq_high(self.sliders["eq_high"].value())
         eng.set_gain(self.sliders["input_gain"].value() / 100.0,
                      self.sliders["output_gain"].value() / 100.0)
         self.lbl_restart.setVisible(False)
