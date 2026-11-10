@@ -1,0 +1,32 @@
+RVC Studio
+==========
+
+本仓库包含的文件
+----------------
+- rvc_studio_qt.py   本项目新增的 PySide6 界面（MIT）
+- rvc_engine.py      从 Retrieval-based-Voice-Conversion-WebUI 的 realtime_gui.py
+                     抽取的音频引擎（MIT，见文件头注释）
+
+上游项目
+--------
+Retrieval-based-Voice-Conversion-WebUI
+https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI
+MIT License, Copyright (c) 2023 liujing04, 源文雨, Ftps
+
+第三方依赖
+----------
+- PySide6 (Qt for Python)   LGPL-3.0
+- PyTorch                   BSD-3-Clause
+- librosa                   ISC
+- sounddevice               MIT
+- NumPy                     BSD-3-Clause
+- SciPy                     BSD-3-Clause
+
+设计参考
+--------
+界面配色与设计 token 参考「歸藏设计」(AGPL-3.0) 的公开设计规范，
+未使用其源代码。
+
+不包含的内容
+------------
+本仓库不包含任何模型权重（.pth）、索引（.index）、音频素材或训练数据。

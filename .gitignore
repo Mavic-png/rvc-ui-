@@ -1,0 +1,33 @@
+# 运行时
+runtime/
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# 模型
+assets/weights/*.pth
+assets/indices/
+*.pth
+*.index
+
+# 训练产物
+logs/
+*.log
+
+# 音频素材
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+
+# 本机配置
+configs/config.json
+rvc_studio_qt_settings.json
+
+# 打包
+build/
+dist/
+*.spec

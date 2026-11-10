@@ -1,0 +1,9 @@
+# 这些依赖通常已包含在 RVC 本体环境中，单独部署时才需要安装。
+# 注意：torch 需要与你的 CUDA 版本匹配，请按 RVC 官方的安装方式处理。
+PySide6>=6.6
+numpy
+sounddevice
+librosa
+torch
+torchaudio
+scipy
