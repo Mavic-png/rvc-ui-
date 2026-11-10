@@ -116,6 +116,75 @@ class DeEsser:
         return np.clip(y, -1.0, 1.0).astype(np.float32)
 
 
+class _WsolaShifter:
+    """流式 WSOLA 变调（音高与共振峰一起移动，时长不变）。"""
+
+    def __init__(self, sr, semitones, frame=2048, hop=512, search=128):
+        self.sr = sr
+        self.frame = frame
+        self.hop = hop
+        self.search = search
+        self.win = np.hanning(frame)
+        self.set_semitones(semitones)
+
+    def set_semitones(self, semitones):
+        self.r = 2.0 ** (float(semitones) / 12.0)
+        self.inbuf = np.zeros(0, dtype=np.float32)
+        self.pos = 0.0
+        self.stretch = np.zeros(0, dtype=np.float32)
+        self.wbuf = np.zeros(0, dtype=np.float32)
+        self.ow = 0
+        self.prev_tail = None
+        self.res_pos = 0.0
+
+    def _ensure(self, n):
+        if len(self.stretch) < n:
+            pad = n - len(self.stretch)
+            self.stretch = np.concatenate([self.stretch, np.zeros(pad, dtype=np.float32)])
+            self.wbuf = np.concatenate([self.wbuf, np.zeros(pad, dtype=np.float32)])
+
+    def _produce(self):
+        while True:
+            base = int(round(self.pos))
+            if base + self.frame + self.search > len(self.inbuf):
+                return
+            best = 0
+            if self.prev_tail is not None:
+                best_score = -1e30
+                for k in range(-self.search, self.search + 1):
+                    seg = self.inbuf[base + k: base + k + self.search]
+                    if len(seg) < self.search:
+                        continue
+                    score = float(np.dot(seg, self.prev_tail))
+                    if score > best_score:
+                        best_score = score
+                        best = k
+            seg = self.inbuf[base + best: base + best + self.frame]
+            if len(seg) < self.frame:
+                return
+            self._ensure(self.ow + self.frame)
+            self.stretch[self.ow:self.ow + self.frame] += seg * self.win
+            self.wbuf[self.ow:self.ow + self.frame] += self.win
+            self.prev_tail = self.stretch[self.ow + self.frame - self.search:
+                                          self.ow + self.frame].copy()
+            self.ow += self.hop
+            self.pos += self.hop / self.r
+
+    def process(self, x):
+        x = np.asarray(x, dtype=np.float32)
+        L = len(x)
+        self.inbuf = np.concatenate([self.inbuf, x])
+        self._produce()
+        need = int(np.ceil(self.res_pos + L * self.r)) + 2
+        self._ensure(need)
+        src = self.stretch[:need]
+        w = self.wbuf[:need]
+        src = np.divide(src, w, out=np.zeros_like(src), where=w > 1e-6)
+        idx = self.res_pos + np.arange(L) * self.r
+        out = np.interp(idx, np.arange(len(src)), src)
+        self.res_pos += L * self.r
+        return out.astype(np.float32)
+
 class VoiceEngine:
     """实时变声引擎。"""
 
@@ -148,6 +217,9 @@ class VoiceEngine:
         self._eq_coeffs = None
         self._eq_zi = None
         self._eq_sr = 0
+        self.pre_shift = 0.0
+        self._pre_shifters = None
+        self._pre_shift_sr = 0
         self.block_frame = None
         self.block_frame_16k = None
         self.crossfade_frame = None
@@ -225,6 +297,32 @@ class VoiceEngine:
         self.eq_high_db = max(0.0, db)
         self._eq_coeffs = None
         self._eq_zi = None
+
+
+    def set_pre_shift(self, semitones):
+        """前置变调：先把人声整体变高（含共振峰），再送进 RVC。"""
+        try:
+            st = float(semitones)
+        except Exception:
+            st = 0.0
+        self.pre_shift = max(-12.0, min(12.0, st))
+        self._pre_shifters = None
+        self._pre_shift_sr = 0
+
+    def _apply_pre_shift(self, indata):
+        st = float(getattr(self, "pre_shift", 0.0) or 0.0)
+        if abs(st) < 0.05:
+            return indata
+        sr = int(getattr(self.cfg, "samplerate", 0) or 0)
+        if sr <= 0:
+            return indata
+        if self._pre_shifters is None or self._pre_shift_sr != sr:
+            self._pre_shifters = _WsolaShifter(sr, st)
+            self._pre_shift_sr = sr
+        try:
+            return self._pre_shifters.process(indata)
+        except Exception:
+            return indata
 
     def _design_high_shelf(self, sr, gain_db, f0=4500.0, q=0.707):
         import math
@@ -632,6 +730,8 @@ class VoiceEngine:
 
         start_time = time.perf_counter()
         indata = librosa.to_mono(indata.T)
+        if getattr(self, "pre_shift", 0):
+            indata = self._apply_pre_shift(indata)
         if getattr(self, "input_gain", 1.0) != 1.0:
             indata = indata * self.input_gain
         raw_in = indata.copy()

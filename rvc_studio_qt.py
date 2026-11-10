@@ -431,7 +431,7 @@ class EngineWorker(QThread):
 class Studio(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RVC STUDIO")
+        self.setWindowTitle("RVC STUDIO v2.1")
         self.resize(1280, 960)
         self.running = False
         self.engine = None
@@ -489,7 +489,7 @@ class Studio(QMainWindow):
         titles.setSpacing(2)
         t = QLabel("RVC STUDIO")
         t.setStyleSheet("color: %s; font-size: 26px; font-weight: 700; letter-spacing: 1px;" % INK)
-        s = QLabel("REAL-TIME VOICE CONVERTER   ·   RVC v2")
+        s = QLabel("REAL-TIME VOICE CONVERTER   ·   v2.1")
         s.setStyleSheet("color: %s; font-size: 10px; letter-spacing: 2px;" % SECOND)
         titles.addWidget(t)
         titles.addWidget(s)
@@ -746,6 +746,10 @@ class Studio(QMainWindow):
         return row
 
     def _on_slider(self, key, raw):
+        if key == "pre_shift":
+            if self.engine is not None:
+                self.engine.set_pre_shift(raw)
+            return
         if key == "eq_high":
             if self.engine is not None:
                 self.engine.set_eq_high(raw)
@@ -774,6 +778,7 @@ class Studio(QMainWindow):
         f, lay = card("常规设置")
         lay.addLayout(self.slider_row("threhold", "响应阈值", -60, 0, -60, lambda v: str(v), " dB"))
         lay.addLayout(self.slider_row("pitch", "音调", -24, 24, 13, lambda v: str(v), " st", True))
+        lay.addLayout(self.slider_row("pre_shift", "前置变调", 0, 12, 0, lambda v: str(v), " st"))
         lay.addLayout(self.slider_row("formant", "声线粗细", -600, 600, 10,
                                       lambda v: "%.2f" % (v / 100), "", True))
         lay.addLayout(self.slider_row("index_rate", "检索占比", 0, 100, 0, lambda v: "%.2f" % (v / 100)))
@@ -1046,6 +1051,7 @@ class Studio(QMainWindow):
         eng.set_scope(self.chk_scope.isChecked())
         eng.set_function("im" if self.rb_monitor.isChecked() else "vc")
         eng.set_eq_high(self.sliders["eq_high"].value())
+        eng.set_pre_shift(self.sliders["pre_shift"].value())
         eng.set_gain(self.sliders["input_gain"].value() / 100.0,
                      self.sliders["output_gain"].value() / 100.0)
         self.lbl_restart.setVisible(False)
