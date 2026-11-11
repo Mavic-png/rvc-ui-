@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RVC Studio · 实时变声桌面客户端（PySide6）。
+"""RVC STUDIO · PySide6 客户端（靛蓝瓷设计 token，已接 rvc_engine）。
 
 设计 token 来自歸藏 guizang-design：
   paper #f1f3f5 / ink #0a1f3d / accent #315d93 / line #d8dde3
@@ -431,6 +431,8 @@ class EngineWorker(QThread):
 
 
 class Studio(QMainWindow):
+    engine_error = Signal(str, bool)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RVC STUDIO v2.2")
@@ -462,6 +464,7 @@ class Studio(QMainWindow):
         self.refresh_devices()
         self._load_settings()
 
+        self.engine_error.connect(self._handle_engine_error)
         self.btn_start.setEnabled(False)
         self.append_log("正在加载音频引擎…（首次约 5–10 秒）")
         self.engine_loader = EngineLoader(self)
@@ -472,12 +475,46 @@ class Studio(QMainWindow):
     def _on_engine_ready(self, engine):
         self.engine = engine
         engine.on_log(self.append_log)
+        engine.on_error(self._on_engine_error)
         self.btn_start.setEnabled(True)
         self.append_log("引擎就绪")
 
     def _on_engine_failed(self, message):
         self.append_log("引擎加载失败：%s" % message)
         QMessageBox.critical(self, "引擎加载失败", message)
+
+    def _on_engine_error(self, message, is_cuda):
+        # 引擎的声卡回调在 PortAudio 线程里触发，用信号切回界面线程
+        self.engine_error.emit(str(message), bool(is_cuda))
+
+    def _handle_engine_error(self, message, is_cuda):
+        self.running = False
+        self.status_timer.stop()
+        self.wave_timer.stop()
+        self.chip_status.setText("●  已停止")
+        self.chip_status.setStyleSheet(
+            "background: %s; border: 1px solid %s; border-radius: 16px;"
+            " padding: 7px 16px; color: %s; font-size: 12px;" % (WHITE, LINE, SECOND))
+        self.chip_infer.setText("推理 0 ms")
+        self.btn_start.setEnabled(self.engine is not None)
+        self.btn_stop.setEnabled(False)
+        self.append_log("音频回调异常：%s" % message)
+        crash_log = os.path.join(RVC_DIR, "logs", "realtime_crash.log")
+        self.append_log("详细堆栈：%s" % crash_log)
+        if is_cuda:
+            QMessageBox.critical(
+                self, "GPU 出错（音频已自动停止）",
+                "声卡回调里检测到 CUDA 错误：%s\n\n"
+                "GPU 上下文已经失效，本进程无法继续推理。\n"
+                "请完全关闭 RVC Studio 再重新打开（不要只点开始）。\n\n"
+                "完整堆栈已写入：\n%s\n\n"
+                "如果反复出现，可用 go-rvc-studio-qt-safe.bat 启动（关闭 CUDA Graph）做对照排查。"
+                % (message, crash_log))
+        else:
+            QMessageBox.warning(
+                self, "音频已停止",
+                "声卡回调异常：%s\n\n已自动停止音频。可以先直接重新点击“开始音频”。\n"
+                "完整堆栈已写入：\n%s" % (message, crash_log))
 
     # ---------- header ----------
     def _header(self):

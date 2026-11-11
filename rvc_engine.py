@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# =============================================================================
-# 本文件由 Retrieval-based-Voice-Conversion-WebUI 的 realtime_gui.py 派生而来。
-# 上游项目：https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI
-# 上游许可证：MIT License
-# Copyright (c) 2023 liujing04
-# Copyright (c) 2023 源文雨
-# Copyright (c) 2023 Ftps
-#
-# 改动：抽取音频引擎为独立类 VoiceEngine，增加日志回调、增益、路由与状态接口。
-# =============================================================================
 """RVC 实时变声引擎（从 realtime_gui.py 抽出，行为不变）。
 
 只负责音频：模型加载、设备枚举、音频回调、参数下发。
@@ -19,6 +9,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import traceback
 
@@ -89,14 +80,15 @@ class DeEsser:
         from scipy.signal import lfilter, sosfilt
 
         x = np.asarray(x, dtype=np.float32)
+        zi = self.zi  # 取一次引用：GUI 线程 set_amount/_reset 时不会拿到半空的 dict
         for k in ("lp1", "lp2", "hp1", "hp2"):
-            if k not in self.zi:
+            if k not in zi:
                 sos = self.lp if k.startswith("lp") else self.hp
-                self.zi[k] = np.zeros((sos.shape[0], 2), dtype=np.float64)
-        low, self.zi["lp1"] = sosfilt(self.lp, x, zi=self.zi["lp1"])
-        low, self.zi["lp2"] = sosfilt(self.lp, low, zi=self.zi["lp2"])
-        high, self.zi["hp1"] = sosfilt(self.hp, x, zi=self.zi["hp1"])
-        high, self.zi["hp2"] = sosfilt(self.hp, high, zi=self.zi["hp2"])
+                zi[k] = np.zeros((sos.shape[0], 2), dtype=np.float64)
+        low, zi["lp1"] = sosfilt(self.lp, x, zi=zi["lp1"])
+        low, zi["lp2"] = sosfilt(self.lp, low, zi=zi["lp2"])
+        high, zi["hp1"] = sosfilt(self.hp, x, zi=zi["hp1"])
+        high, zi["hp2"] = sosfilt(self.hp, high, zi=zi["hp2"])
         env, self.env_zi = lfilter(
             [self.alpha],
             [1.0, -(1.0 - self.alpha)],
@@ -220,6 +212,14 @@ class VoiceEngine:
         self.pre_shift = 0.0
         self._pre_shifters = None
         self._pre_shift_sr = 0
+        # ---- 线程/故障状态 ----
+        self._cb_lock = threading.Lock()
+        self._eq_lock = threading.Lock()
+        self._faulted = False
+        self.cuda_faulted = False
+        self.last_error = None
+        self._error_cb = None
+
         self.block_frame = None
         self.block_frame_16k = None
         self.crossfade_frame = None
@@ -252,6 +252,10 @@ class VoiceEngine:
     def on_log(self, callback):
         self._log_cb = callback
 
+    def on_error(self, callback):
+        """回调出错（尤其 CUDA 故障）时通知界面，参数为 (摘要, 是否 CUDA)。"""
+        self._error_cb = callback
+
     def _log(self, *args):
         msg = args[0] % args[1:] if len(args) > 1 else (args[0] if args else "")
         if self._log_cb:
@@ -259,6 +263,74 @@ class VoiceEngine:
                 self._log_cb(str(msg))
             except Exception:
                 pass
+
+    # ---------- 故障处理 ----------
+    def _crash_log_path(self):
+        return os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "logs", "realtime_crash.log"
+        )
+
+    def _write_crash_log(self, text):
+        header = "\n=== %s ===\n" % time.strftime("%Y-%m-%d %H:%M:%S")
+        body = str(text).rstrip() + "\n"
+        try:
+            body += "cuda_faulted=%s allocated=%.1fMiB reserved=%.1fMiB f0=%s\n" % (
+                self.cuda_faulted,
+                torch.cuda.memory_allocated() / 2 ** 20,
+                torch.cuda.memory_reserved() / 2 ** 20,
+                getattr(self.cfg, "f0method", "?"),
+            )
+        except Exception:
+            pass
+        paths = [self._crash_log_path()]
+        try:
+            import tempfile
+
+            paths.append(os.path.join(tempfile.gettempdir(), "rvc_realtime_crash.log"))
+        except Exception:
+            pass
+        for path in paths:
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(header)
+                    f.write(body)
+                self._log("音频回调异常，已写入 %s" % path)
+                return
+            except Exception:
+                continue
+
+    def _handle_callback_error(self):
+        text = traceback.format_exc()
+        self._faulted = True
+        self._running = False
+        lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+        self.last_error = (lines[-1] if lines else "音频回调异常")[:300]
+        if "CUDA" in text or "illegal memory" in text:
+            self.cuda_faulted = True
+            try:
+                from tools.cuda_graph import disable_cuda_graphs
+
+                disable_cuda_graphs("audio callback CUDA error")
+            except Exception:
+                pass
+            self._log("CUDA 出错，本次运行已关闭 CUDA Graph")
+        self._write_crash_log(text)
+        cb = self._error_cb
+        if cb is not None:
+            try:
+                cb(self.last_error, bool(self.cuda_faulted))
+            except Exception:
+                pass
+        threading.Thread(target=self._deferred_stop, daemon=True).start()
+
+    def _deferred_stop(self):
+        # 不能在声卡回调线程里直接 abort/close 流
+        time.sleep(0.2)
+        try:
+            self.stop_stream()
+        except Exception:
+            pass
 
     # ---------- 状态 ----------
     def status(self):
@@ -280,6 +352,9 @@ class VoiceEngine:
             "sr": int(getattr(self.cfg, "samplerate", 0) or 0),
             "delay_ms": int(round(delay * 1000)),
             "infer_ms": int(getattr(self, "stat_infer", 0) or 0),
+            "faulted": bool(self._faulted),
+            "cuda_faulted": bool(self.cuda_faulted),
+            "error": self.last_error,
         }
 
     def get_scope(self):
@@ -288,15 +363,25 @@ class VoiceEngine:
     def set_function(self, fn):
         self.function = fn if fn in ("vc", "im") else "vc"
 
+    def set_scope(self, enabled):
+        self.show_scope = bool(enabled)
+
+    def set_gain(self, input_gain=None, output_gain=None):
+        if input_gain is not None:
+            self.input_gain = float(input_gain)
+        if output_gain is not None:
+            self.output_gain = float(output_gain)
 
     def set_eq_high(self, db):
+        """高架衰减：db<=0 表示不处理，正数表示在 4.5kHz 以上衰减该 dB 数。"""
         try:
             db = float(db)
         except Exception:
             db = 0.0
-        self.eq_high_db = max(0.0, db)
-        self._eq_coeffs = None
-        self._eq_zi = None
+        with self._eq_lock:
+            self.eq_high_db = max(0.0, db)
+            self._eq_coeffs = None
+            self._eq_zi = None
 
 
     def set_pre_shift(self, semitones):
@@ -325,6 +410,7 @@ class VoiceEngine:
             return indata
 
     def _design_high_shelf(self, sr, gain_db, f0=4500.0, q=0.707):
+        from scipy.signal import lfilter  # noqa: F401
         import math
         amp = 10.0 ** (-abs(gain_db) / 40.0)
         w0 = 2.0 * math.pi * f0 / float(sr)
@@ -337,15 +423,21 @@ class VoiceEngine:
         b2 = amp * ((amp + 1) + (amp - 1) * cos_w0 - beta)
         a1 = 2 * ((amp - 1) - (amp + 1) * cos_w0)
         a2 = (amp + 1) - (amp - 1) * cos_w0 - beta
-        return [b0 / a0, b1 / a0, b2 / a0], [1.0, a1 / a0, a2 / a0]
+        b = [b0 / a0, b1 / a0, b2 / a0]
+        a = [1.0, a1 / a0, a2 / a0]
+        return b, a
 
     def _apply_eq(self, outdata):
-        import numpy as np
-        from scipy.signal import lfilter
-        db = float(getattr(self, 'eq_high_db', 0.0) or 0.0)
+        with self._eq_lock:
+            return self._apply_eq_locked(outdata)
+
+    def _apply_eq_locked(self, outdata):
+        db = float(getattr(self, "eq_high_db", 0.0) or 0.0)
         if db <= 0.01:
             return outdata
-        sr = int(getattr(self.cfg, 'samplerate', 0) or 0)
+        import numpy as np
+        from scipy.signal import lfilter
+        sr = int(getattr(self.cfg, "samplerate", 0) or 0)
         if sr <= 0:
             return outdata
         if self._eq_coeffs is None or self._eq_sr != sr or self._eq_zi is None:
@@ -362,15 +454,6 @@ class VoiceEngine:
                 outdata[:, ch], z = lfilter(b, a, outdata[:, ch], zi=self._eq_zi[ch])
                 self._eq_zi[ch] = z
         return outdata
-
-    def set_scope(self, enabled):
-        self.show_scope = bool(enabled)
-
-    def set_gain(self, input_gain=None, output_gain=None):
-        if input_gain is not None:
-            self.input_gain = float(input_gain)
-        if output_gain is not None:
-            self.output_gain = float(output_gain)
 
 
     def load(self):
@@ -504,7 +587,20 @@ class VoiceEngine:
 
 
     def start_vc(self):
-        torch.cuda.empty_cache()
+        if self.stream is not None:
+            self.stop_stream()
+        self._faulted = False
+        self.cuda_faulted = False
+        self.last_error = None
+        try:
+            from tools.cuda_graph import empty_cuda_cache_safely
+
+            empty_cuda_cache_safely()
+        except Exception:
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
         self.rvc = rvc_for_realtime.RVC(
             self.cfg.pitch,
             self.cfg.formant,
@@ -684,50 +780,83 @@ class VoiceEngine:
 
 
     def start_stream(self):
-
-        if not self._running:
-            self._running = True
-            if (
-                "WASAPI" in self.cfg.sg_hostapi
-                and self.cfg.sg_wasapi_exclusive
-            ):
-                extra_settings = sd.WasapiSettings(exclusive=True)
-            else:
-                extra_settings = None
-            self.stream = sd.Stream(
-                callback=self.audio_callback,
-                blocksize=self.block_frame,
-                samplerate=self.cfg.samplerate,
-                channels=self.cfg.channels,
-                dtype="float32",
-                extra_settings=extra_settings,
-            )
-            self.stream.start()
-            self.stat_running = True
-            self.stat_sr = int(self.cfg.samplerate)
+        if self._running:
+            return
+        if "WASAPI" in self.cfg.sg_hostapi and self.cfg.sg_wasapi_exclusive:
+            extra_settings = sd.WasapiSettings(exclusive=True)
+        else:
+            extra_settings = None
+        stream = sd.Stream(
+            callback=self.audio_callback,
+            blocksize=self.block_frame,
+            samplerate=self.cfg.samplerate,
+            channels=self.cfg.channels,
+            dtype="float32",
+            extra_settings=extra_settings,
+        )
+        self.stream = stream
+        self._faulted = False
+        self.last_error = None
+        self._running = True
+        try:
+            stream.start()
+        except Exception:
+            self._running = False
+            self.stream = None
+            raise
+        self.stat_running = True
+        self.stat_sr = int(self.cfg.samplerate)
 
 
     def stop_stream(self):
+        stream, self.stream = self.stream, None
+        self._running = False
+        if stream is not None:
+            try:
+                stream.abort()
+            except Exception:
+                pass
+        # 关键：等已经进入的回调真正退出后再释放缓冲。声卡回调线程可能还在用
+        # self.input_wav 等 CUDA 张量，提前换掉会让 kernel 读到已释放的显存，
+        # 表现为随机的 CUDA illegal memory access（栈里看不出真正现场）。
+        with self._cb_lock:
+            pass
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        self.stat_running = False
+        self.scope_in = None
+        self.scope_out = None
+        self.scope_seq = getattr(self, "scope_seq", 0) + 1
 
-        if self._running:
-            self._running = False
-            if self.stream is not None:
-                self.stream.abort()
-                self.stream.close()
-                self.stream = None
-                self.stat_running = False
-                self.scope_in = None
-                self.scope_out = None
-                self.scope_seq = getattr(self, "scope_seq", 0) + 1
 
+    def audio_callback(self, indata, outdata, frames, times, status):
+        """声卡回调入口：异常绝不允许逃出 cffi 回调。
 
-    def audio_callback(
-        self, indata, outdata, frames, times, status
-    ):
+        以前回调里的任何异常都会直接冒到 PortAudio 的 C 回调；pythonw 没有
+        控制台，于是弹 "Python-CFFI error" 框并停掉音频流，日志里什么都不留。
+        现在统一转成静音 + 崩溃日志 + 通知界面。
         """
-        音频处理
-        """
+        if not self._running or self._faulted:
+            outdata.fill(0.0)
+            return
+        if not self._cb_lock.acquire(blocking=False):
+            outdata.fill(0.0)
+            return
+        try:
+            self._process_audio(indata, outdata, frames)
+        except Exception:
+            try:
+                outdata.fill(0.0)
+            except Exception:
+                pass
+            self._handle_callback_error()
+        finally:
+            self._cb_lock.release()
 
+    def _process_audio(self, indata, outdata, frames):
         start_time = time.perf_counter()
         indata = librosa.to_mono(indata.T)
         if getattr(self, "pre_shift", 0):
@@ -893,6 +1022,7 @@ class VoiceEngine:
         )
         if getattr(self, "deesser", None) is not None:
             outdata[:] = self.deesser.process(outdata[:, 0])[:, None]
+        outdata = self._apply_eq(outdata)
         if getattr(self, "output_gain", 1.0) != 1.0:
             outdata *= self.output_gain
         if getattr(self, "show_scope", True):
