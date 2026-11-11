@@ -435,7 +435,7 @@ class Studio(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RVC STUDIO v2.4")
+        self.setWindowTitle("RVC STUDIO v2.5")
         self.resize(1280, 960)
         self.running = False
         self.engine = None
@@ -529,7 +529,7 @@ class Studio(QMainWindow):
         titles.setSpacing(2)
         t = QLabel("RVC STUDIO")
         t.setStyleSheet("color: %s; font-size: 26px; font-weight: 700; letter-spacing: 1px;" % INK)
-        s = QLabel("REAL-TIME VOICE CONVERTER   ·   v2.4")
+        s = QLabel("REAL-TIME VOICE CONVERTER   ·   v2.5")
         s.setStyleSheet("color: %s; font-size: 10px; letter-spacing: 2px;" % SECOND)
         titles.addWidget(t)
         titles.addWidget(s)
@@ -807,6 +807,10 @@ class Studio(QMainWindow):
         return row
 
     def _on_slider(self, key, raw):
+        if key == "voice_sim":
+            if self.engine is not None:
+                self.engine.set_voice_sim(raw / 100.0)
+            return
         if key == "eq_high":
             if self.engine is not None:
                 self.engine.set_eq_high(raw)
@@ -841,6 +845,7 @@ class Studio(QMainWindow):
         lay.addLayout(self.slider_row("rms_mix_rate", "响度因子", 0, 100, 26, lambda v: "%.2f" % (v / 100)))
         lay.addLayout(self.slider_row("deess", "齿音抑制", 0, 100, 30, lambda v: "%.2f" % (v / 100)))
         lay.addLayout(self.slider_row("eq_high", "高音衰减", 0, 12, 0, lambda v: "%d" % v, " dB"))
+        lay.addLayout(self.slider_row("voice_sim", "语音听感", 0, 100, 0, lambda v: "%d%%" % v))
         row = QHBoxLayout()
         row.setSpacing(14)
         lab = QLabel("音高算法")
@@ -1107,6 +1112,7 @@ class Studio(QMainWindow):
         eng.set_scope(self.chk_scope.isChecked())
         eng.set_function("im" if self.rb_monitor.isChecked() else "vc")
         eng.set_eq_high(self.sliders["eq_high"].value())
+        eng.set_voice_sim(self.sliders["voice_sim"].value() / 100.0)
         eng.set_gain(self.sliders["input_gain"].value() / 100.0,
                      self.sliders["output_gain"].value() / 100.0)
         self.lbl_restart.setVisible(False)

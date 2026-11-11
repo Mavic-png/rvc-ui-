@@ -206,6 +206,8 @@ class VoiceEngine:
         self.input_gain = 1.0
         self.output_gain = 1.0
         self._hp_state = None
+        self.voice_sim = 0.0
+        self._sim_state = None
         self._lim_env = 1.0
         self._lim_sr = 0
         self.eq_high_db = 0.0
@@ -387,6 +389,46 @@ class VoiceEngine:
             self._eq_zi = None
 
 
+
+
+    def set_voice_sim(self, amount):
+        """0..1：0=原始，1=接近语音软件（低通 8k + 高架 -2dB）。"""
+        try:
+            v = float(amount)
+        except Exception:
+            v = 0.0
+        self.voice_sim = max(0.0, min(1.0, v))
+
+    def _apply_voice_sim(self, x):
+        import numpy as np
+        from scipy.signal import lfilter, butter
+        mix = float(getattr(self, "voice_sim", 0.0) or 0.0)
+        if mix <= 0.001:
+            return x
+        sr = int(getattr(self.cfg, "samplerate", 0) or 0)
+        if sr <= 0:
+            return x
+        cutoff = 16000.0 - 8000.0 * mix
+        cutoff = min(cutoff, sr / 2.0 - 200.0)
+        shelf = -2.0 * mix
+        key = (sr, round(cutoff, 1), round(shelf, 2))
+        if getattr(self, "_sim_state", None) is None or self._sim_state[0] != key:
+            nch = x.shape[1] if x.ndim > 1 else 1
+            lp_b, lp_a = butter(2, cutoff / (sr / 2.0), btype="low")
+            sh_b, sh_a = self._design_high_shelf(sr, shelf)
+            self._sim_state = (key, lp_b, lp_a, sh_b, sh_a,
+                               np.zeros((nch, 2)), np.zeros((nch, 2)))
+        key_, lp_b, lp_a, sh_b, sh_a, zlp, zsh = self._sim_state
+        if x.ndim == 1:
+            y, z = lfilter(lp_b, lp_a, x, zi=zlp[0]); zlp[0] = z
+            y, z = lfilter(sh_b, sh_a, y, zi=zsh[0]); zsh[0] = z
+            return y
+        out = np.empty_like(x)
+        for ch in range(x.shape[1]):
+            y, z = lfilter(lp_b, lp_a, x[:, ch], zi=zlp[ch]); zlp[ch] = z
+            y, z = lfilter(sh_b, sh_a, y, zi=zsh[ch]); zsh[ch] = z
+            out[:, ch] = y
+        return out
 
     def _apply_dc_block(self, x):
         """20Hz 一阶高通，去掉直流和低频轰鸣。"""
@@ -1093,6 +1135,7 @@ class VoiceEngine:
         outdata = self._apply_eq(outdata)
         if getattr(self, "output_gain", 1.0) != 1.0:
             outdata *= self.output_gain
+        outdata = self._apply_voice_sim(outdata)
         outdata = self._apply_limiter(outdata)
         if getattr(self, "show_scope", True):
             self.scope_out = outdata[:, 0].copy()
