@@ -205,6 +205,9 @@ class VoiceEngine:
         self.scope_seq = 0
         self.input_gain = 1.0
         self.output_gain = 1.0
+        self._hp_state = None
+        self._lim_env = 1.0
+        self._lim_sr = 0
         self.eq_high_db = 0.0
         self._eq_coeffs = None
         self._eq_zi = None
@@ -383,6 +386,52 @@ class VoiceEngine:
             self._eq_coeffs = None
             self._eq_zi = None
 
+
+
+    def _apply_dc_block(self, x):
+        """20Hz 一阶高通，去掉直流和低频轰鸣。"""
+        import numpy as np
+        from scipy.signal import lfilter
+        sr = int(getattr(self.cfg, "samplerate", 0) or 0)
+        if sr <= 0:
+            return x
+        if getattr(self, "_hp_state", None) is None or self._hp_state[0] != sr:
+            a = float(np.exp(-2.0 * np.pi * 20.0 / sr))
+            nch = x.shape[1] if x.ndim > 1 else 1
+            self._hp_state = (sr, [a, -a], [1.0, -a], np.zeros((nch, 1)))
+        sr_, b, aa, zi = self._hp_state
+        if x.ndim == 1:
+            y, z = lfilter(b, aa, x, zi=zi[0])
+            zi[0] = z
+            return y
+        out = np.empty_like(x)
+        for ch in range(x.shape[1]):
+            y, z = lfilter(b, aa, x[:, ch], zi=zi[ch])
+            out[:, ch] = y
+            zi[ch] = z
+        return out
+
+    def _apply_limiter(self, x):
+        """峰值限幅：-1 dBFS 上限，快攻击慢释放，防止增益/均衡后削波。"""
+        import numpy as np
+        sr = int(getattr(self.cfg, "samplerate", 0) or 0)
+        if sr <= 0 or x.size == 0:
+            return x
+        peak = float(np.max(np.abs(x)))
+        if peak <= 1e-9:
+            return x
+        thr = 0.891  # -1 dBFS
+        target = 1.0 if peak <= thr else thr / peak
+        n = x.shape[0] if x.ndim > 1 else x.size
+        block_dur = float(n) / float(sr)
+        if target < getattr(self, "_lim_env", 1.0):
+            self._lim_env = target
+        else:
+            rel = float(np.exp(-block_dur / 0.10))
+            self._lim_env = target + (getattr(self, "_lim_env", 1.0) - target) * rel
+        y = x * self._lim_env
+        np.clip(y, -1.0, 1.0, out=y)
+        return y
 
     def set_pre_shift(self, semitones):
         """前置变调：先把人声整体变高（含共振峰），再送进 RVC。"""
@@ -610,12 +659,30 @@ class VoiceEngine:
             self.rvc_config,
             self.rvc if hasattr(self, "rvc") else None,
         )
-        self.cfg.samplerate = (
+        self.cfg.channels = self.get_device_channels()
+        dev_sr = self.get_device_samplerate()
+        want_sr = (
             self.rvc.tgt_sr
             if self.cfg.sr_type == "sr_model"
-            else self.get_device_samplerate()
+            else dev_sr
         )
-        self.cfg.channels = self.get_device_channels()
+
+        def _supports(sr):
+            try:
+                sd.check_input_settings(
+                    device=sd.default.device[0], channels=self.cfg.channels,
+                    samplerate=int(sr), dtype="float32")
+                sd.check_output_settings(
+                    device=sd.default.device[1], channels=self.cfg.channels,
+                    samplerate=int(sr), dtype="float32")
+                return True
+            except Exception:
+                return False
+
+        if not _supports(want_sr):
+            self._log("采样率 %s 不被设备支持，回退到 %s", want_sr, dev_sr)
+            want_sr = dev_sr
+        self.cfg.samplerate = int(want_sr)
         self.deesser = DeEsser(self.cfg.samplerate)
         self.deesser.set_amount(self.deesser_amount)
         self.zc = self.cfg.samplerate // 100
@@ -1022,9 +1089,11 @@ class VoiceEngine:
         )
         if getattr(self, "deesser", None) is not None:
             outdata[:] = self.deesser.process(outdata[:, 0])[:, None]
+        outdata = self._apply_dc_block(outdata)
         outdata = self._apply_eq(outdata)
         if getattr(self, "output_gain", 1.0) != 1.0:
             outdata *= self.output_gain
+        outdata = self._apply_limiter(outdata)
         if getattr(self, "show_scope", True):
             self.scope_out = outdata[:, 0].copy()
             self.scope_seq = getattr(self, "scope_seq", 0) + 1
@@ -1083,7 +1152,7 @@ class VoiceEngine:
 
     def get_device_samplerate(self):
         return int(
-            sd.query_devices(device=sd.default.device[0])["default_samplerate"]
+            sd.query_devices(device=sd.default.device[1])["default_samplerate"]
         )
 
 
