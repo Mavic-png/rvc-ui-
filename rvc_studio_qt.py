@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -96,6 +97,7 @@ QLabel#cardTitle {{
 }}
 QLabel#fieldLabel {{ color: {SECOND}; font-size: 12px; }}
 QLabel#valueLabel {{ color: {ACCENT}; font-size: 12px; font-weight: 600; }}
+QLineEdit#valueEdit {{ color: {ACCENT}; font-size: 12px; font-weight: 600; background: transparent; border: none; padding: 0; }}
 QLabel#chip {{
     background: {WHITE};
     border: 1px solid {LINE};
@@ -431,12 +433,13 @@ class EngineWorker(QThread):
 class Studio(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RVC STUDIO v2.1")
+        self.setWindowTitle("RVC STUDIO v2.2")
         self.resize(1280, 960)
         self.running = False
         self.engine = None
         self.worker = None
         self.sliders = {}
+        self.value_edits = {}
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -489,7 +492,7 @@ class Studio(QMainWindow):
         titles.setSpacing(2)
         t = QLabel("RVC STUDIO")
         t.setStyleSheet("color: %s; font-size: 26px; font-weight: 700; letter-spacing: 1px;" % INK)
-        s = QLabel("REAL-TIME VOICE CONVERTER   ·   v2.1")
+        s = QLabel("REAL-TIME VOICE CONVERTER   ·   v2.2")
         s.setStyleSheet("color: %s; font-size: 10px; letter-spacing: 2px;" % SECOND)
         titles.addWidget(t)
         titles.addWidget(s)
@@ -734,22 +737,39 @@ class Studio(QMainWindow):
         lab.setFixedWidth(78)
         s = DesignSlider(lo, hi, val, bipolar=bipolar)
         s.valueChanged.connect(lambda v, k=key: self._on_slider(k, v))
-        value = QLabel(fmt(val) + suffix)
-        value.setObjectName("valueLabel")
-        value.setFixedWidth(62)
+        value = QLineEdit(fmt(val) + suffix)
+        value.setObjectName("valueEdit")
+        value.setFixedWidth(64)
         value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        value.setFrame(False)
         s.valueChanged.connect(lambda v, lv=value, f=fmt, sf=suffix: lv.setText(f(v) + sf))
+
+        def _apply_text(k=key, sl=s, f=fmt, sf=suffix, lo=lo, hi=hi):
+            import re as _re
+            txt = value.text().replace(sf, "")
+            m = _re.search(r"[-+]?\d*\.?\d+", txt)
+            if not m:
+                value.setText(f(sl.value()) + sf)
+                return
+            num = float(m.group())
+            scale = {"formant": 100.0, "index_rate": 100.0, "rms_mix_rate": 100.0,
+                     "deess": 100.0, "block_time": 100.0,
+                     "crossfade_length": 100.0, "extra_time": 100.0}.get(k, 1.0)
+            raw = max(lo, min(hi, int(round(num * scale))))
+            if raw != sl.value():
+                sl.setValue(raw)
+            value.setText(f(sl.value()) + sf)
+
+        value.editingFinished.connect(_apply_text)
+        value.returnPressed.connect(_apply_text)
         self.sliders[key] = s
+        self.value_edits[key] = value
         row.addWidget(lab)
         row.addWidget(s, 1)
         row.addWidget(value)
         return row
 
     def _on_slider(self, key, raw):
-        if key == "pre_shift":
-            if self.engine is not None:
-                self.engine.set_pre_shift(raw)
-            return
         if key == "eq_high":
             if self.engine is not None:
                 self.engine.set_eq_high(raw)
@@ -778,7 +798,6 @@ class Studio(QMainWindow):
         f, lay = card("常规设置")
         lay.addLayout(self.slider_row("threhold", "响应阈值", -60, 0, -60, lambda v: str(v), " dB"))
         lay.addLayout(self.slider_row("pitch", "音调", -24, 24, 13, lambda v: str(v), " st", True))
-        lay.addLayout(self.slider_row("pre_shift", "前置变调", 0, 12, 0, lambda v: str(v), " st"))
         lay.addLayout(self.slider_row("formant", "声线粗细", -600, 600, 10,
                                       lambda v: "%.2f" % (v / 100), "", True))
         lay.addLayout(self.slider_row("index_rate", "检索占比", 0, 100, 0, lambda v: "%.2f" % (v / 100)))
@@ -1051,7 +1070,6 @@ class Studio(QMainWindow):
         eng.set_scope(self.chk_scope.isChecked())
         eng.set_function("im" if self.rb_monitor.isChecked() else "vc")
         eng.set_eq_high(self.sliders["eq_high"].value())
-        eng.set_pre_shift(self.sliders["pre_shift"].value())
         eng.set_gain(self.sliders["input_gain"].value() / 100.0,
                      self.sliders["output_gain"].value() / 100.0)
         self.lbl_restart.setVisible(False)
