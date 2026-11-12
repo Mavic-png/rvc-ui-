@@ -435,13 +435,16 @@ class Studio(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RVC STUDIO v2.5")
+        self.setWindowTitle("RVC STUDIO v2.6")
         self.resize(1280, 960)
         self.running = False
         self.engine = None
         self.worker = None
         self.sliders = {}
         self.value_edits = {}
+        self.model_presets = {}
+        self._current_model = ""
+        self._preset_guard = False
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -529,7 +532,7 @@ class Studio(QMainWindow):
         titles.setSpacing(2)
         t = QLabel("RVC STUDIO")
         t.setStyleSheet("color: %s; font-size: 26px; font-weight: 700; letter-spacing: 1px;" % INK)
-        s = QLabel("REAL-TIME VOICE CONVERTER   ·   v2.5")
+        s = QLabel("REAL-TIME VOICE CONVERTER   ·   v2.6")
         s.setStyleSheet("color: %s; font-size: 10px; letter-spacing: 2px;" % SECOND)
         titles.addWidget(t)
         titles.addWidget(s)
@@ -595,6 +598,9 @@ class Studio(QMainWindow):
             row.addWidget(combo, 1)
             row.addWidget(btn)
             lay.addLayout(row)
+        self.lbl_preset = QLabel("参数预设：自动保存")
+        self.lbl_preset.setObjectName("fieldHint")
+        lay.addWidget(self.lbl_preset)
         return f
 
     def _browse_pth(self):
@@ -647,6 +653,12 @@ class Studio(QMainWindow):
         self._on_model_changed(self.pth_combo.currentText())
 
     def _on_model_changed(self, name):
+        old = getattr(self, "_current_model", "")
+        if old and old != name and not self._preset_guard:
+            self._capture_preset(old)
+        self._current_model = name or ""
+        if name and not self._preset_guard:
+            self._apply_preset(name)
         if hasattr(self, "stat_model"):
             self.stat_model.setText(name or "—")
         if hasattr(self, "stat_index"):
@@ -806,7 +818,48 @@ class Studio(QMainWindow):
         row.addWidget(value)
         return row
 
+    def _capture_preset(self, name):
+        if not name:
+            return
+        self.model_presets[name] = {k: s.value() for k, s in self.sliders.items()}
+
+    def _apply_preset(self, name):
+        preset = self.model_presets.get(name)
+        if not preset:
+            self._update_preset_label(False)
+            return
+        self._preset_guard = True
+        try:
+            for k, v in preset.items():
+                s = self.sliders.get(k)
+                if s is not None:
+                    s.setValue(int(v))
+        finally:
+            self._preset_guard = False
+        self._update_preset_label(True)
+
+    def _remember_preset(self):
+        if getattr(self, "_preset_guard", False):
+            return
+        name = getattr(self, "_current_model", "")
+        if not name:
+            return
+        self.model_presets[name] = {k: s.value() for k, s in self.sliders.items()}
+        self._update_preset_label(True)
+
+    def _update_preset_label(self, saved):
+        if not hasattr(self, "lbl_preset"):
+            return
+        name = getattr(self, "_current_model", "")
+        if not name:
+            self.lbl_preset.setText("参数预设：自动保存")
+        elif saved:
+            self.lbl_preset.setText("参数预设：已保存 %d 项（切换模型自动恢复）" % len(self.model_presets.get(name, {})))
+        else:
+            self.lbl_preset.setText("参数预设：无，调整任意参数后自动保存")
+
     def _on_slider(self, key, raw):
+        self._remember_preset()
         if key == "voice_sim":
             if self.engine is not None:
                 self.engine.set_voice_sim(raw / 100.0)
@@ -1017,6 +1070,8 @@ class Studio(QMainWindow):
         except Exception:
             return
 
+        self.model_presets = data.get("model_presets") or {}
+
         def set_combo(combo, value, editable):
             if not value:
                 return
@@ -1063,6 +1118,7 @@ class Studio(QMainWindow):
             "output_nr": self.chk_out_nr.isChecked(),
             "wasapi_exclusive": self.chk_wasapi.isChecked(),
             "sliders": {k: s.value() for k, s in self.sliders.items()},
+            "model_presets": self.model_presets,
         }
         try:
             with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
