@@ -22,6 +22,8 @@ class AudioDiagnostics:
         self.blocks = 0
         self.in_samples = 0
         self.out_samples = 0
+        self.in_sq_sum = 0.0
+        self.out_sq_sum = 0.0
         self.in_clip = 0
         self.out_clip = 0
         self.in_silent_blocks = 0
@@ -54,6 +56,7 @@ class AudioDiagnostics:
             self.in_rms_last = ir
             self.in_clip += int(np.count_nonzero(np.abs(inp) >= 0.999))
             self.in_samples += inp.size
+            self.in_sq_sum += float(np.sum(inp * inp))
             if ir < 1e-4:
                 self.in_silent_blocks += 1
         if out.size:
@@ -63,6 +66,7 @@ class AudioDiagnostics:
             self.out_rms_last = orms
             self.out_clip += int(np.count_nonzero(np.abs(out) >= 0.999))
             self.out_samples += out.size
+            self.out_sq_sum += float(np.sum(out * out))
             if orms < 1e-4:
                 self.out_silent_blocks += 1
         self.blocks += 1
@@ -94,6 +98,10 @@ class AudioDiagnostics:
     def snapshot(self):
         in_clip_rate = (self.in_clip / self.in_samples) if self.in_samples else 0.0
         out_clip_rate = (self.out_clip / self.out_samples) if self.out_samples else 0.0
+        in_rms_avg = ((self.in_sq_sum / self.in_samples) ** 0.5
+                      if self.in_samples else 0.0)
+        out_rms_avg = ((self.out_sq_sum / self.out_samples) ** 0.5
+                       if self.out_samples else 0.0)
         f0_ratio = (self.f0_valid / self.f0_total) if self.f0_total else 0.0
         f0 = list(self.f0_values)
         if len(f0) > 500:
@@ -102,9 +110,11 @@ class AudioDiagnostics:
         return {
             "blocks": self.blocks,
             "in_peak": round(self.in_peak, 4),
-            "in_rms": round(self.in_rms_last, 4),
+            "in_rms": round(in_rms_avg, 4),
+            "in_rms_last": round(self.in_rms_last, 4),
             "out_peak": round(self.out_peak, 4),
-            "out_rms": round(self.out_rms_last, 4),
+            "out_rms": round(out_rms_avg, 4),
+            "out_rms_last": round(self.out_rms_last, 4),
             "in_clip": self.in_clip,
             "out_clip": self.out_clip,
             "in_clip_rate": round(in_clip_rate, 6),
