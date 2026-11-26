@@ -7,6 +7,8 @@
 """
 import glob
 import json
+import logging
+import shutil
 
 import numpy as np
 import os
@@ -14,6 +16,8 @@ import re
 import sys
 import tempfile
 import time
+
+from logging.handlers import RotatingFileHandler
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtCore import QPointF
@@ -62,6 +66,20 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "rvc_studio_qt_settings.json")
 BUFFER_KEYS = {"block_time", "crossfade_length", "extra_time"}
+
+APP_LOG = os.path.join(LOGS_DIR, "rvc_studio_app.log")
+LOGGER = logging.getLogger("rvc_studio")
+LOGGER.setLevel(logging.INFO)
+if not LOGGER.handlers:
+    try:
+        _handler = RotatingFileHandler(APP_LOG, maxBytes=2 * 1024 * 1024,
+                                       backupCount=3, encoding="utf-8")
+        _handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(message)s"))
+        LOGGER.addHandler(_handler)
+    except Exception:
+        logging.basicConfig(level=logging.WARNING)
+        LOGGER.exception("failed to initialize rotating application log")
 if RVC_DIR not in sys.path:
     sys.path.insert(0, RVC_DIR)
 
@@ -461,6 +479,9 @@ class Studio(QMainWindow):
 
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._poll_status)
+        self.device_timer = QTimer(self)
+        self.device_timer.setInterval(2500)
+        self.device_timer.timeout.connect(self._check_devices)
         self.wave_timer = QTimer(self)
         self.wave_timer.setInterval(60)
         self.wave_timer.timeout.connect(self._poll_wave)
@@ -763,6 +784,10 @@ class Studio(QMainWindow):
         self.stat_index = self._kv(lay, "索引检索", "关闭")
         self.stat_delay = self._kv(lay, "算法延迟", "0 ms")
         self.stat_infer = self._kv(lay, "推理时间", "0 ms")
+        self.stat_cb_avg = self._kv(lay, "处理平均", "—")
+        self.stat_cb_p95 = self._kv(lay, "处理 P95", "—")
+        self.stat_cb_p99 = self._kv(lay, "处理 P99", "—")
+        self.stat_overrun = self._kv(lay, "溢出/欠载", "0 / 0")
         return f
 
     def _kv(self, lay, key, val, strong=False):
@@ -1045,9 +1070,14 @@ class Studio(QMainWindow):
         return self.engine
 
     def append_log(self, message):
-        self.log_view.appendPlainText(str(message).strip())
+        text = str(message).strip()
+        self.log_view.appendPlainText(text)
         bar = self.log_view.verticalScrollBar()
         bar.setValue(bar.maximum())
+        try:
+            LOGGER.info("%s", text)
+        except Exception:
+            logging.getLogger("rvc_studio").exception("failed to write application log")
 
     def _abs_pth(self):
         name = self.pth_combo.currentText().strip()
@@ -1062,12 +1092,28 @@ class Studio(QMainWindow):
         return name if os.path.isabs(name) else os.path.join(RVC_DIR, name.replace("/", os.sep))
 
     def _load_settings(self):
-        if not os.path.exists(SETTINGS_PATH):
-            return
-        try:
-            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
+        data = None
+        primary_error = None
+        for candidate in (SETTINGS_PATH, SETTINGS_PATH + ".bak"):
+            if not os.path.exists(candidate):
+                continue
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if not isinstance(loaded, dict):
+                    raise ValueError("设置文件根节点必须是 JSON 对象")
+                data = loaded
+                if candidate != SETTINGS_PATH:
+                    LOGGER.warning("primary settings invalid; loaded backup: %s", candidate)
+                    self.append_log("主设置文件无法读取，已从备份恢复设置")
+                break
+            except Exception as exc:  # noqa: BLE001
+                if candidate == SETTINGS_PATH:
+                    primary_error = exc
+                LOGGER.warning("failed to load settings %s: %s", candidate, exc)
+        if data is None:
+            if primary_error is not None:
+                self.append_log("设置文件读取失败，将使用默认设置：%s" % primary_error)
             return
 
         self.model_presets = data.get("model_presets") or {}
@@ -1120,11 +1166,30 @@ class Studio(QMainWindow):
             "sliders": {k: s.value() for k, s in self.sliders.items()},
             "model_presets": self.model_presets,
         }
+        tmp = SETTINGS_PATH + ".tmp"
         try:
-            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+                f.flush()
+                os.fsync(f.fileno())
+            with open(tmp, "r", encoding="utf-8") as f:
+                json.load(f)
+            if os.path.exists(SETTINGS_PATH):
+                try:
+                    shutil.copy2(SETTINGS_PATH, SETTINGS_PATH + ".bak")
+                except OSError:
+                    LOGGER.exception("failed to create settings backup")
+            os.replace(tmp, SETTINGS_PATH)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log("保存设置失败：%s" % exc)
+            try:
+                LOGGER.exception("save settings failed")
+            except Exception:
+                pass
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     def _collect_values(self):
         eng = self._ensure_engine()
@@ -1196,6 +1261,7 @@ class Studio(QMainWindow):
             "background: %s; border: 1px solid %s; border-radius: 16px;"
             " padding: 7px 16px; color: %s; font-size: 12px;" % (WHITE, LINE, GREEN))
         self.status_timer.start(200)
+        self.device_timer.start()
         self.wave_timer.start()
         self._poll_status()
 
@@ -1213,6 +1279,7 @@ class Studio(QMainWindow):
             except Exception as exc:  # noqa: BLE001
                 self.append_log("停止异常：%s" % exc)
         self.status_timer.stop()
+        self.device_timer.stop()
         self.wave_timer.stop()
         self.wave_out.clear()
         self.wave_in.clear()
@@ -1226,8 +1293,54 @@ class Studio(QMainWindow):
         self.chip_infer.setText("推理 0 ms")
         self.stat_delay.setText("0 ms")
         self.stat_infer.setText("0 ms")
+        self.stat_cb_avg.setText("—")
+        self.stat_cb_p95.setText("—")
+        self.stat_cb_p99.setText("—")
+        self.stat_overrun.setText("0 / 0")
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+
+    def _check_devices(self):
+        if not self.running or self.engine is None:
+            return
+        try:
+            import sounddevice as sd
+            apis = sd.query_hostapis()
+            hi = self.host_combo.currentIndex()
+            if hi < 0 or hi >= len(apis):
+                return
+            devs = sd.query_devices()
+            input_names = set()
+            output_names = set()
+            for di in apis[hi].get("devices", []):
+                if di < 0 or di >= len(devs):
+                    continue
+                device = devs[di]
+                if int(device.get("max_input_channels", 0) or 0) > 0:
+                    input_names.add(device["name"])
+                if int(device.get("max_output_channels", 0) or 0) > 0:
+                    output_names.add(device["name"])
+            missing = []
+            if self.in_combo.currentText() not in input_names:
+                missing.append("输入：" + self.in_combo.currentText())
+            if self.out_combo.currentText() not in output_names:
+                missing.append("输出：" + self.out_combo.currentText())
+            if missing:
+                msg = "音频设备已断开（%s）" % "，".join(missing)
+                self.append_log(msg)
+                try:
+                    LOGGER.warning(msg)
+                except Exception:
+                    pass
+                self.lbl_restart.setText("音频设备已断开，请重新选择设备后启动")
+                self.lbl_restart.setVisible(True)
+                self.stop_engine()
+                self.refresh_devices()
+        except Exception as exc:  # noqa: BLE001
+            try:
+                LOGGER.warning("device check failed: %s", exc)
+            except Exception:
+                pass
 
     def _poll_status(self):
         if self.engine is None:
@@ -1242,6 +1355,11 @@ class Studio(QMainWindow):
             self.chip_infer.setText("推理 %d ms" % st["infer_ms"])
             self.stat_delay.setText("%d ms" % st["delay_ms"])
             self.stat_infer.setText("%d ms" % st["infer_ms"])
+            self.stat_cb_avg.setText("%.1f ms" % st.get("cb_avg_ms", 0.0))
+            self.stat_cb_p95.setText("%.1f ms" % st.get("cb_p95_ms", 0.0))
+            self.stat_cb_p99.setText("%.1f ms" % st.get("cb_p99_ms", 0.0))
+            self.stat_overrun.setText("%d / %d" % (
+                st.get("overflows", 0), st.get("underflows", 0)))
 
     def closeEvent(self, event):
         self._save_settings()
