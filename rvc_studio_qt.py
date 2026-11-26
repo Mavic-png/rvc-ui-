@@ -621,7 +621,7 @@ class Studio(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RVC STUDIO v2.6")
+        self.setWindowTitle("RVC STUDIO v2.7 beta")
         self.resize(1280, 960)
         self.running = False
         self.engine = None
@@ -721,7 +721,7 @@ class Studio(QMainWindow):
         titles.setSpacing(2)
         t = QLabel("RVC STUDIO")
         t.setStyleSheet("color: %s; font-size: 26px; font-weight: 700; letter-spacing: 1px;" % INK)
-        s = QLabel("REAL-TIME VOICE CONVERTER   ·   v2.6")
+        s = QLabel("REAL-TIME VOICE CONVERTER   ·   v2.7 beta")
         s.setStyleSheet("color: %s; font-size: 10px; letter-spacing: 2px;" % SECOND)
         titles.addWidget(t)
         titles.addWidget(s)

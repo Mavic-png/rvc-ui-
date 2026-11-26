@@ -1,8 +1,17 @@
-# RVC Studio
+# RVC Studio v2.7 beta
 
 实时变声的桌面客户端，基于 [RVC](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI) 的推理引擎，界面用 PySide6 重写。
 
 > 本仓库**只包含界面与实时推理引擎**，不附带 RVC 本体、预训练模型或任何声音模型。
+
+## v2.7 beta 更新
+
+- 音质诊断：输入/输出峰值、RMS、削波率、静音比例、F0 曲线与有效帧
+- 诊断对话框：实时指标、F0 曲线、录制输入/输出 WAV、导出 JSON 报告
+- 回调/推理延迟统计：avg / P95 / P99、溢出与欠载计数
+- 设备热插拔监控：设备掉线自动停止并提示
+- 配置原子保存与 .bak 自动回退
+- 统一滚动日志：logs/rvc_studio_app.log
 
 ## 这个仓库是什么 / 不是什么
 
