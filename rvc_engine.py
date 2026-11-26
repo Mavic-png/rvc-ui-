@@ -23,6 +23,7 @@ import torch.nn.functional as F
 import torchaudio.transforms as tat
 from scipy.signal import butter, lfilter, sosfilt
 
+from audio_diagnostics import AudioDiagnostics
 from configs.config import Config
 from infer import rtrvc as rvc_for_realtime
 from tools.cuda_graph import cuda_graph_enabled, run_cuda_graph
@@ -233,6 +234,8 @@ class VoiceEngine:
         self._lat_cb = deque(maxlen=600)
         self._lat_infer = deque(maxlen=600)
         self._lat_period = deque(maxlen=600)
+        self.diagnostics = AudioDiagnostics()
+        self._diag_pitchf = None
         self._last_cb_at = 0.0
         self.stat_overflows = 0
         self.stat_underflows = 0
@@ -740,6 +743,11 @@ class VoiceEngine:
         self.last_error = None
         self.reset_stats()
         try:
+            self.diagnostics.sample_rate = int(self.cfg.samplerate or 48000)
+            self.diagnostics.reset()
+        except Exception:
+            pass
+        try:
             from tools.cuda_graph import empty_cuda_cache_safely
 
             empty_cuda_cache_safely()
@@ -757,6 +765,20 @@ class VoiceEngine:
             self.rvc_config,
             self.rvc if hasattr(self, "rvc") else None,
         )
+        try:
+            _orig_get_f0 = self.rvc.get_f0
+
+            def _diag_get_f0(*args, **kwargs):
+                pitch, pitchf = _orig_get_f0(*args, **kwargs)
+                try:
+                    self._diag_pitchf = pitchf.detach().cpu().numpy().copy()
+                except Exception:
+                    self._diag_pitchf = None
+                return pitch, pitchf
+
+            self.rvc.get_f0 = _diag_get_f0
+        except Exception:
+            self._diag_pitchf = None
         self.cfg.channels = self.get_device_channels()
         dev_sr = self.get_device_samplerate()
         want_sr = (
@@ -1213,6 +1235,11 @@ class VoiceEngine:
         if getattr(self, "show_scope", True):
             self.scope_out = outdata[:, 0].copy()
             self.scope_seq = getattr(self, "scope_seq", 0) + 1
+        try:
+            self.diagnostics.feed(raw_in, outdata,
+                                  getattr(self, "_diag_pitchf", None))
+        except Exception:
+            pass
         total_time = time.perf_counter() - start_time
         if self._running:
             self.stat_infer = int(infer_ms)

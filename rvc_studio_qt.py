@@ -19,7 +19,7 @@ import time
 
 from logging.handlers import RotatingFileHandler
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import (
     QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPolygonF,
@@ -29,7 +29,9 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
+    QGridLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -446,6 +448,172 @@ class EngineWorker(QThread):
             self.ready.emit()
         except Exception as exc:  # noqa: BLE001
             self.failed.emit("%s: %s" % (type(exc).__name__, exc))
+
+
+class F0Canvas(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.values = []
+        self.setMinimumHeight(180)
+
+    def set_values(self, values):
+        self.values = list(values or [])
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor("#ffffff"))
+        p.setPen(QPen(QColor("#d8dde3"), 1))
+        for i in range(1, 4):
+            y = h * i / 4
+            p.drawLine(0, int(y), w, int(y))
+        if len(self.values) < 2:
+            p.setPen(QColor("#8a97a8"))
+            p.drawText(self.rect(), Qt.AlignCenter, "等待 F0 数据…")
+            return
+        lo = min(self.values)
+        hi = max(self.values)
+        if hi - lo < 1.0:
+            hi = lo + 1.0
+        span = hi - lo
+        pen = QPen(QColor("#315d93"), 2)
+        p.setPen(pen)
+        path = QPainterPath()
+        n = len(self.values)
+        for i, v in enumerate(self.values):
+            x = i * (w - 1) / max(1, n - 1)
+            y = h - 6 - (v - lo) / span * (h - 12)
+            if i == 0:
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+        p.drawPath(path)
+        p.setPen(QColor("#5a6b80"))
+        p.drawText(6, 14, "%.0f Hz" % hi)
+        p.drawText(6, h - 6, "%.0f Hz" % lo)
+
+
+class DiagnosticsDialog(QDialog):
+    def __init__(self, parent, engine):
+        super().__init__(parent)
+        self.engine = engine
+        self.setWindowTitle("音质诊断")
+        self.resize(760, 620)
+        lay = QVBoxLayout(self)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(24)
+        grid.setVerticalSpacing(8)
+        self.labels = {}
+        keys = [
+            ("in_peak", "输入峰值"), ("in_rms", "输入 RMS"),
+            ("in_clip", "输入削波样本"), ("in_clip_rate", "输入削波率"),
+            ("in_silence_ratio", "输入静音比例"),
+            ("out_peak", "输出峰值"), ("out_rms", "输出 RMS"),
+            ("out_clip", "输出削波样本"), ("out_clip_rate", "输出削波率"),
+            ("out_silence_ratio", "输出静音比例"),
+            ("f0_valid_ratio", "F0 有效帧比例"), ("f0_frames", "F0 帧数"),
+            ("cb_p95_ms", "处理 P95"), ("cb_p99_ms", "处理 P99"),
+            ("overflows", "输入溢出"), ("underflows", "输出欠载"),
+        ]
+        for idx, (key, title) in enumerate(keys):
+            k = QLabel(title)
+            k.setStyleSheet("color: #5a6b80;")
+            v = QLabel("—")
+            v.setStyleSheet("color: #0a1f3d; font-weight: 600;")
+            grid.addWidget(k, idx // 4, (idx % 4) * 2)
+            grid.addWidget(v, idx // 4, (idx % 4) * 2 + 1)
+            self.labels[key] = v
+        lay.addLayout(grid)
+        lay.addWidget(QLabel("F0 曲线"))
+        self.f0 = F0Canvas(self)
+        lay.addWidget(self.f0, 1)
+
+        row = QHBoxLayout()
+        self.btn_rec = QPushButton("开始录制诊断音频")
+        self.btn_rec.clicked.connect(self._toggle_recording)
+        self.btn_export = QPushButton("导出报告")
+        self.btn_export.clicked.connect(self._export_report)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.close)
+        row.addWidget(self.btn_rec)
+        row.addWidget(self.btn_export)
+        row.addStretch(1)
+        row.addWidget(btn_close)
+        lay.addLayout(row)
+
+        self.timer = QTimer(self)
+        self.timer.setInterval(300)
+        self.timer.timeout.connect(self.refresh)
+        self.timer.start()
+        self.refresh()
+
+    def refresh(self):
+        try:
+            snap = self.engine.diagnostics.snapshot()
+            st = self.engine.status()
+        except Exception:
+            return
+        for key, label in self.labels.items():
+            value = snap.get(key, st.get(key, "—"))
+            if isinstance(value, float):
+                label.setText("%.4f" % value)
+            else:
+                label.setText(str(value))
+        self.labels["cb_p95_ms"].setText("%.1f ms" % st.get("cb_p95_ms", 0.0))
+        self.labels["cb_p99_ms"].setText("%.1f ms" % st.get("cb_p99_ms", 0.0))
+        self.labels["overflows"].setText(str(st.get("overflows", 0)))
+        self.labels["underflows"].setText(str(st.get("underflows", 0)))
+        self.f0.set_values(snap.get("f0_curve") or [])
+        if snap.get("recording"):
+            self.btn_rec.setText("停止录制（%.1f s）" % snap.get("record_seconds", 0.0))
+        else:
+            self.btn_rec.setText("开始录制诊断音频")
+
+    def _toggle_recording(self):
+        if self.engine.diagnostics.snapshot().get("recording"):
+            self.engine.diagnostics.stop_recording()
+            path, _ = QFileDialog.getSaveFileName(
+                self, "保存诊断音频", os.path.join(tempfile.gettempdir(), "rvc_diag.wav"),
+                "WAV (*.wav)")
+            if path:
+                ok = self.engine.diagnostics.save_recording(path)
+                if ok:
+                    QMessageBox.information(self, "诊断", "已保存：\n%s" % path)
+                else:
+                    QMessageBox.warning(self, "诊断", "没有可保存的录音数据")
+        else:
+            self.engine.diagnostics.start_recording(60)
+            self.refresh()
+
+    def _export_report(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出诊断报告", os.path.join(tempfile.gettempdir(), "rvc_diag.json"),
+            "JSON (*.json)")
+        if not path:
+            return
+        try:
+            self.engine.diagnostics.export_report(path, {
+                "f0method": self.engine.cfg.f0method,
+                "index_rate": self.engine.cfg.index_rate,
+                "pitch": self.engine.cfg.pitch,
+                "formant": self.engine.cfg.formant,
+                "input_nr": self.engine.cfg.I_noise_reduce,
+                "output_nr": self.engine.cfg.O_noise_reduce,
+                "model": os.path.basename(self.engine.cfg.pth_path),
+            })
+            QMessageBox.information(self, "诊断", "已导出：\n%s" % path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "导出失败", str(exc))
+
+    def closeEvent(self, event):
+        self.timer.stop()
+        try:
+            self.engine.diagnostics.stop_recording()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 class Studio(QMainWindow):
@@ -1042,8 +1210,12 @@ class Studio(QMainWindow):
         self.btn_stop.setObjectName("secondary")
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self.stop_engine)
+        self.btn_diag = QPushButton("音质诊断")
+        self.btn_diag.setObjectName("ghost")
+        self.btn_diag.clicked.connect(self._open_diagnostics)
         row.addWidget(self.btn_start)
         row.addWidget(self.btn_stop)
+        row.addWidget(self.btn_diag)
 
         self.rb_monitor = QRadioButton("输入监听")
         self.rb_vc = QRadioButton("输出变声")
@@ -1264,6 +1436,13 @@ class Studio(QMainWindow):
         self.device_timer.start()
         self.wave_timer.start()
         self._poll_status()
+
+    def _open_diagnostics(self):
+        if self.engine is None:
+            QMessageBox.information(self, "音质诊断", "音频引擎还在加载，请稍候。")
+            return
+        dlg = DiagnosticsDialog(self, self.engine)
+        dlg.exec()
 
     def _on_failed(self, message):
         self.running = False
