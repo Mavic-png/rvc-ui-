@@ -450,6 +450,19 @@ class EngineWorker(QThread):
             self.failed.emit("%s: %s" % (type(exc).__name__, exc))
 
 
+DIAG_SCRIPT = """【测试语音 A · 正常语速，约 20 秒】
+今天天气不错，我们沿着河边慢慢走。远处有几只白鹭掠过水面，风从树叶间穿过来，带着一点潮湿的草木气味。路边的长椅上坐着一位老人，他正低头把面包撕成小块，喂给脚边的麻雀。
+
+【测试语音 B · 快速说话，约 15 秒】
+我刚才在楼下看见一辆蓝色的自行车，车筐里放着一袋面包和两瓶牛奶，骑车的人戴着灰色帽子，拐弯的时候差点撞到路边的栏杆，幸好他及时捏住了刹车。
+
+【测试语音 C · 大小声交替】
+（轻声）你听，外面的雨好像停了。
+（大声）快看！彩虹从楼后面出来了！
+（轻声）我们等一会儿再走吧。
+（正常）好，那就再坐五分钟。"""
+
+
 class F0Canvas(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -500,7 +513,7 @@ class DiagnosticsDialog(QDialog):
         super().__init__(parent)
         self.engine = engine
         self.setWindowTitle("音质诊断")
-        self.resize(760, 620)
+        self.resize(780, 780)
         lay = QVBoxLayout(self)
         grid = QGridLayout()
         grid.setHorizontalSpacing(24)
@@ -530,15 +543,29 @@ class DiagnosticsDialog(QDialog):
         self.f0 = F0Canvas(self)
         lay.addWidget(self.f0, 1)
 
+        lay.addWidget(QLabel("朗读测试文本"))
+        self.script_view = QPlainTextEdit()
+        self.script_view.setReadOnly(True)
+        self.script_view.setPlainText(DIAG_SCRIPT)
+        self.script_view.setMaximumHeight(150)
+        self.script_view.setStyleSheet(
+            "QPlainTextEdit { background: #f7f8fa; border: 1px solid #d8dde3;"
+            " border-radius: 8px; padding: 8px; color: #33445c; font-size: 12px; }")
+        lay.addWidget(self.script_view)
+
         row = QHBoxLayout()
         self.btn_rec = QPushButton("开始录制诊断音频")
         self.btn_rec.clicked.connect(self._toggle_recording)
         self.btn_export = QPushButton("导出报告")
         self.btn_export.clicked.connect(self._export_report)
+        self.btn_copy = QPushButton("复制文本")
+        self.btn_copy.clicked.connect(
+            lambda: QApplication.clipboard().setText(DIAG_SCRIPT))
         btn_close = QPushButton("关闭")
         btn_close.clicked.connect(self.close)
         row.addWidget(self.btn_rec)
         row.addWidget(self.btn_export)
+        row.addWidget(self.btn_copy)
         row.addStretch(1)
         row.addWidget(btn_close)
         lay.addLayout(row)
