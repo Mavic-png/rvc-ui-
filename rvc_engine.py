@@ -6,7 +6,9 @@
 界面通过 start/stop/status/set_param/list_devices 调用；日志通过 on_log 回调抛出。
 """
 import json
+import logging
 import os
+from collections import deque
 import re
 import sys
 import threading
@@ -194,6 +196,7 @@ class VoiceEngine:
         self.resampler2 = None
         self._running = False
         self._log_cb = None
+        self._logger = logging.getLogger("rvc_studio.engine")
         self._prewarmed = False
         self.deesser_amount = 0.0
         self.device_latency = 0.0
@@ -224,6 +227,16 @@ class VoiceEngine:
         self.cuda_faulted = False
         self.last_error = None
         self._error_cb = None
+
+        # ---- 性能统计（回调耗时/推理耗时/回调周期）----
+        self._lat_lock = threading.Lock()
+        self._lat_cb = deque(maxlen=600)
+        self._lat_infer = deque(maxlen=600)
+        self._lat_period = deque(maxlen=600)
+        self._last_cb_at = 0.0
+        self.stat_overflows = 0
+        self.stat_underflows = 0
+        self.reset_stats()
 
         self.block_frame = None
         self.block_frame_16k = None
@@ -267,7 +280,9 @@ class VoiceEngine:
             try:
                 self._log_cb(str(msg))
             except Exception:
-                pass
+                self._logger.exception("engine log callback failed")
+        else:
+            self._logger.info("%s", msg)
 
     # ---------- 故障处理 ----------
     def _crash_log_path(self):
@@ -303,10 +318,12 @@ class VoiceEngine:
                 self._log("音频回调异常，已写入 %s" % path)
                 return
             except Exception:
+                self._logger.exception("failed to write crash log: %s", path)
                 continue
 
     def _handle_callback_error(self):
         text = traceback.format_exc()
+        self._logger.error("audio callback failed:\n%s", text)
         self._faulted = True
         self._running = False
         lines = [ln for ln in text.strip().splitlines() if ln.strip()]
@@ -318,7 +335,7 @@ class VoiceEngine:
 
                 disable_cuda_graphs("audio callback CUDA error")
             except Exception:
-                pass
+                self._logger.exception("failed to disable CUDA Graph after callback error")
             self._log("CUDA 出错，本次运行已关闭 CUDA Graph")
         self._write_crash_log(text)
         cb = self._error_cb
@@ -326,7 +343,7 @@ class VoiceEngine:
             try:
                 cb(self.last_error, bool(self.cuda_faulted))
             except Exception:
-                pass
+                self._logger.exception("engine error callback failed")
         threading.Thread(target=self._deferred_stop, daemon=True).start()
 
     def _deferred_stop(self):
@@ -335,9 +352,46 @@ class VoiceEngine:
         try:
             self.stop_stream()
         except Exception:
-            pass
+            self._logger.exception("deferred audio stream stop failed")
 
     # ---------- 状态 ----------
+    @staticmethod
+    def _pct(values, pct):
+        if not values:
+            return 0.0
+        data = sorted(values)
+        idx = int(round((len(data) - 1) * pct))
+        return float(data[max(0, min(idx, len(data) - 1))])
+
+    def reset_stats(self):
+        with self._lat_lock:
+            self._lat_cb.clear()
+            self._lat_infer.clear()
+            self._lat_period.clear()
+            self.stat_overflows = 0
+            self.stat_underflows = 0
+            self._last_cb_at = 0.0
+
+    def stats_snapshot(self):
+        with self._lat_lock:
+            cb = list(self._lat_cb)
+            infer = list(self._lat_infer)
+            period = list(self._lat_period)
+            overflows = int(self.stat_overflows)
+            underflows = int(self.stat_underflows)
+        return {
+            "cb_avg_ms": round(sum(cb) / len(cb), 1) if cb else 0.0,
+            "cb_p95_ms": round(self._pct(cb, 0.95), 1),
+            "cb_p99_ms": round(self._pct(cb, 0.99), 1),
+            "infer_avg_ms": round(sum(infer) / len(infer), 1) if infer else 0.0,
+            "infer_p95_ms": round(self._pct(infer, 0.95), 1),
+            "infer_p99_ms": round(self._pct(infer, 0.99), 1),
+            "period_avg_ms": round(sum(period) / len(period), 1) if period else 0.0,
+            "samples": len(cb),
+            "overflows": overflows,
+            "underflows": underflows,
+        }
+
     def status(self):
         delay = 0.0
         if self._running and self.stream is not None:
@@ -360,6 +414,7 @@ class VoiceEngine:
             "faulted": bool(self._faulted),
             "cuda_faulted": bool(self.cuda_faulted),
             "error": self.last_error,
+            **self.stats_snapshot(),
         }
 
     def get_scope(self):
@@ -683,6 +738,7 @@ class VoiceEngine:
         self._faulted = False
         self.cuda_faulted = False
         self.last_error = None
+        self.reset_stats()
         try:
             from tools.cuda_graph import empty_cuda_cache_safely
 
@@ -924,7 +980,7 @@ class VoiceEngine:
             try:
                 stream.abort()
             except Exception:
-                pass
+                self._logger.exception("PortAudio stream abort failed")
         # 关键：等已经进入的回调真正退出后再释放缓冲。声卡回调线程可能还在用
         # self.input_wav 等 CUDA 张量，提前换掉会让 kernel 读到已释放的显存，
         # 表现为随机的 CUDA illegal memory access（栈里看不出真正现场）。
@@ -934,7 +990,7 @@ class VoiceEngine:
             try:
                 stream.close()
             except Exception:
-                pass
+                self._logger.exception("PortAudio stream close failed")
         self.stat_running = False
         self.scope_in = None
         self.scope_out = None
@@ -948,6 +1004,21 @@ class VoiceEngine:
         控制台，于是弹 "Python-CFFI error" 框并停掉音频流，日志里什么都不留。
         现在统一转成静音 + 崩溃日志 + 通知界面。
         """
+        now = time.perf_counter()
+        with self._lat_lock:
+            if self._last_cb_at:
+                period_ms = (now - self._last_cb_at) * 1000.0
+                self._lat_period.append(period_ms)
+            self._last_cb_at = now
+        if status is not None:
+            try:
+                with self._lat_lock:
+                    if getattr(status, "input_overflow", False):
+                        self.stat_overflows += 1
+                    if getattr(status, "output_underflow", False):
+                        self.stat_underflows += 1
+            except Exception:
+                pass
         if not self._running or self._faulted:
             outdata.fill(0.0)
             return
@@ -1035,6 +1106,7 @@ class VoiceEngine:
                 resample_input,
             )[160:]
         # infer
+        infer_started = time.perf_counter()
         if self.function == "vc":
             infer_wav = self.rvc.infer(
                 self.input_wav_res,
@@ -1054,6 +1126,7 @@ class VoiceEngine:
             infer_wav = self.input_wav_denoise[self.extra_frame :].clone()
         else:
             infer_wav = self.input_wav[self.extra_frame :].clone()
+        infer_ms = (time.perf_counter() - infer_started) * 1000.0
         # output noise reduction
         if self.cfg.O_noise_reduce and self.function == "vc":
             self.output_buffer[: -self.block_frame] = self.output_buffer[
@@ -1142,7 +1215,10 @@ class VoiceEngine:
             self.scope_seq = getattr(self, "scope_seq", 0) + 1
         total_time = time.perf_counter() - start_time
         if self._running:
-            self.stat_infer = int(total_time * 1000)
+            self.stat_infer = int(infer_ms)
+            with self._lat_lock:
+                self._lat_cb.append(total_time * 1000.0)
+                self._lat_infer.append(infer_ms)
 
 
     def update_devices(self, hostapi_name=None):
