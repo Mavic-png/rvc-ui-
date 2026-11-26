@@ -527,6 +527,7 @@ class DiagnosticsDialog(QDialog):
             ("out_clip", "输出削波样本"), ("out_clip_rate", "输出削波率"),
             ("out_silence_ratio", "输出静音比例"),
             ("f0_valid_ratio", "F0 有效帧比例"), ("f0_frames", "F0 帧数"),
+            ("blocks", "采集块数"), ("record_seconds", "录音时长"),
             ("cb_p95_ms", "处理 P95"), ("cb_p99_ms", "处理 P99"),
             ("overflows", "输入溢出"), ("underflows", "输出欠载"),
         ]
@@ -599,6 +600,16 @@ class DiagnosticsDialog(QDialog):
             self.btn_rec.setText("开始录制诊断音频")
 
     def _toggle_recording(self):
+        running = False
+        try:
+            running = bool(self.engine.status().get("running"))
+        except Exception:
+            pass
+        if not running and not self.engine.diagnostics.snapshot().get("recording"):
+            QMessageBox.information(
+                self, "音质诊断",
+                "请先在主界面点「开始音频转换」，确认输入设备有声音后再开始录制。")
+            return
         if self.engine.diagnostics.snapshot().get("recording"):
             self.engine.diagnostics.stop_recording()
             path, _ = QFileDialog.getSaveFileName(
@@ -609,7 +620,13 @@ class DiagnosticsDialog(QDialog):
                 if ok:
                     QMessageBox.information(self, "诊断", "已保存：\n%s" % path)
                 else:
-                    QMessageBox.warning(self, "诊断", "没有可保存的录音数据")
+                    QMessageBox.warning(
+                        self, "诊断",
+                        "录制期间没有收到音频数据。\n\n"
+                        "请确认：\n"
+                        "1. 已在主界面开始音频转换\n"
+                        "2. 采集块数在增加\n"
+                        "3. 输入设备有声音")
         else:
             self.engine.diagnostics.start_recording(60)
             self.refresh()
