@@ -67,6 +67,7 @@ os.makedirs(WEIGHTS_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "rvc_studio_qt_settings.json")
+DIAG_DIR = os.path.join(RVC_DIR, "diagnostics")
 BUFFER_KEYS = {"block_time", "crossfade_length", "extra_time"}
 
 APP_LOG = os.path.join(LOGS_DIR, "rvc_studio_app.log")
@@ -553,6 +554,9 @@ class DiagnosticsDialog(QDialog):
             "QPlainTextEdit { background: #f7f8fa; border: 1px solid #d8dde3;"
             " border-radius: 8px; padding: 8px; color: #33445c; font-size: 12px; }")
         lay.addWidget(self.script_view)
+        hint = QLabel("录制停止后自动保存到：%s" % DIAG_DIR)
+        hint.setStyleSheet("color: #5a6b80; font-size: 11px;")
+        lay.addWidget(hint)
 
         row = QHBoxLayout()
         self.btn_rec = QPushButton("开始录制诊断音频")
@@ -612,21 +616,44 @@ class DiagnosticsDialog(QDialog):
             return
         if self.engine.diagnostics.snapshot().get("recording"):
             self.engine.diagnostics.stop_recording()
-            path, _ = QFileDialog.getSaveFileName(
-                self, "保存诊断音频", os.path.join(tempfile.gettempdir(), "rvc_diag.wav"),
-                "WAV (*.wav)")
-            if path:
-                ok = self.engine.diagnostics.save_recording(path)
-                if ok:
-                    QMessageBox.information(self, "诊断", "已保存：\n%s" % path)
-                else:
-                    QMessageBox.warning(
-                        self, "诊断",
-                        "录制期间没有收到音频数据。\n\n"
-                        "请确认：\n"
-                        "1. 已在主界面开始音频转换\n"
-                        "2. 采集块数在增加\n"
-                        "3. 输入设备有声音")
+            try:
+                os.makedirs(DIAG_DIR, exist_ok=True)
+            except OSError as exc:
+                QMessageBox.warning(self, "诊断", "无法创建诊断目录：%s" % exc)
+                return
+            cfg = self.engine.cfg
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            tag = "%s_nr%d%d_idx%03d" % (
+                cfg.f0method,
+                1 if cfg.I_noise_reduce else 0,
+                1 if cfg.O_noise_reduce else 0,
+                int(round(float(cfg.index_rate) * 100)))
+            base = os.path.join(DIAG_DIR, "diag_%s_%s" % (stamp, tag))
+            ok = self.engine.diagnostics.save_recording(base + ".wav")
+            if ok:
+                try:
+                    self.engine.diagnostics.export_report(base + ".json", {
+                        "f0method": cfg.f0method,
+                        "index_rate": cfg.index_rate,
+                        "pitch": cfg.pitch,
+                        "formant": cfg.formant,
+                        "input_nr": cfg.I_noise_reduce,
+                        "output_nr": cfg.O_noise_reduce,
+                        "model": os.path.basename(cfg.pth_path),
+                    })
+                except Exception:
+                    pass
+                QMessageBox.information(
+                    self, "诊断",
+                    "已自动保存：\nWAV  %s\nJSON %s" % (base + ".wav", base + ".json"))
+            else:
+                QMessageBox.warning(
+                    self, "诊断",
+                    "录制期间没有收到音频数据。\n\n"
+                    "请确认：\n"
+                    "1. 已在主界面开始音频转换\n"
+                    "2. 采集块数在增加\n"
+                    "3. 输入设备有声音")
         else:
             self.engine.diagnostics.start_recording(60)
             self.refresh()
