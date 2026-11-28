@@ -13,6 +13,12 @@
 - 配置原子保存与 .bak 自动回退
 - 统一滚动日志：logs/rvc_studio_app.log
 
+## 交接文档
+
+项目现状、目录职责、v2.7 改动、诊断数据、已知问题与下一步计划见：
+
+**[docs/HANDOVER.md](docs/HANDOVER.md)**
+
 ## 这个仓库是什么 / 不是什么
 
 | | |
