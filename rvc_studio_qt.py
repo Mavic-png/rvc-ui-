@@ -603,6 +603,31 @@ class DiagnosticsDialog(QDialog):
         else:
             self.btn_rec.setText("开始录制诊断音频")
 
+    def _report_extra(self):
+        cfg = self.engine.cfg
+        return {
+            "f0method": cfg.f0method,
+            "index_rate": cfg.index_rate,
+            "pitch": cfg.pitch,
+            "formant": cfg.formant,
+            "input_nr": cfg.I_noise_reduce,
+            "output_nr": cfg.O_noise_reduce,
+            "model": os.path.basename(cfg.pth_path),
+            "index": os.path.basename(cfg.index_path) if cfg.index_path else "",
+            "block_time": cfg.block_time,
+            "crossfade_time": cfg.crossfade_time,
+            "extra_time": cfg.extra_time,
+            "threhold": cfg.threhold,
+            "rms_mix_rate": cfg.rms_mix_rate,
+            "input_gain": getattr(self.engine, "input_gain", 1.0),
+            "output_gain": getattr(self.engine, "output_gain", 1.0),
+            "deesser": getattr(self.engine, "deesser_amount", 0.0),
+            "eq_high_db": getattr(self.engine, "eq_high_db", 0.0),
+            "voice_sim": getattr(self.engine, "voice_sim", 0.0),
+            "hostapi": cfg.sg_hostapi,
+            "sr_type": cfg.sr_type,
+        }
+
     def _toggle_recording(self):
         running = False
         try:
@@ -632,15 +657,8 @@ class DiagnosticsDialog(QDialog):
             ok = self.engine.diagnostics.save_recording(base + ".wav")
             if ok:
                 try:
-                    self.engine.diagnostics.export_report(base + ".json", {
-                        "f0method": cfg.f0method,
-                        "index_rate": cfg.index_rate,
-                        "pitch": cfg.pitch,
-                        "formant": cfg.formant,
-                        "input_nr": cfg.I_noise_reduce,
-                        "output_nr": cfg.O_noise_reduce,
-                        "model": os.path.basename(cfg.pth_path),
-                    })
+                    self.engine.diagnostics.export_report(
+                        base + ".json", self._report_extra())
                 except Exception:
                     pass
                 QMessageBox.information(
@@ -665,15 +683,7 @@ class DiagnosticsDialog(QDialog):
         if not path:
             return
         try:
-            self.engine.diagnostics.export_report(path, {
-                "f0method": self.engine.cfg.f0method,
-                "index_rate": self.engine.cfg.index_rate,
-                "pitch": self.engine.cfg.pitch,
-                "formant": self.engine.cfg.formant,
-                "input_nr": self.engine.cfg.I_noise_reduce,
-                "output_nr": self.engine.cfg.O_noise_reduce,
-                "model": os.path.basename(self.engine.cfg.pth_path),
-            })
+            self.engine.diagnostics.export_report(path, self._report_extra())
             QMessageBox.information(self, "诊断", "已导出：\n%s" % path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "导出失败", str(exc))

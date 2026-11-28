@@ -23,8 +23,8 @@
 
 | | |
 |---|---|
-| ✅ 包含 | PySide6 界面 + 实时变声引擎（rvc_engine.py，含音频回调、推理循环、音高提取、索引检索） |
-| ❌ 不包含 | RVC 本体代码（infer/、tools/、configs/）、HuBERT/RMVPE 预训练模型、.pth 声音模型、.index 索引 |
+| ✅ 包含 | PySide6 界面（`rvc_studio_qt.py`）、实时变声引擎（`rvc_engine.py`）、音质诊断（`audio_diagnostics.py`）、CUDA/降噪补丁（`tools/cuda_graph.py`、`tools/file_io.py`、`tools/torchgate/`）、启动脚本（`run.bat`、`go-rvc-studio-qt-safe.bat`） |
+| ❌ 不包含 | RVC 上游 `infer/` 与其余上游 `tools/`、`configs/`、HuBERT/RMVPE 预训练模型、`.pth` 声音模型、`.index` 索引 |
 | 运行方式 | 放进已安装好的 RVC 根目录里运行，不是独立 exe |
 
 ![界面截图](screenshots/main.png)
@@ -48,15 +48,20 @@
 
 ## 安装
 
-把两个文件放进 RVC 根目录（和 `assets/`、`configs/`、`runtime/` 同级）：
+把本仓库文件放进已安装好的 RVC 根目录（和 `assets/`、`configs/`、`runtime/` 同级，覆盖或补充 `tools/` 下的同名文件）：
 
 ```
 RVC根目录/
-├─ assets/weights/          ← 放你的 .pth 模型
-├─ configs/                 ← 已存在
-├─ runtime/                 ← RVC 自带
-├─ rvc_studio_qt.py         ← 本仓库
-└─ rvc_engine.py            ← 本仓库
+├─ assets/weights/           ← 放你的 .pth 模型
+├─ configs/                  ← 已存在
+├─ infer/                    ← 已存在（上游）
+├─ runtime/                  ← RVC 自带
+├─ tools/                    ← 本仓库覆盖 cuda_graph.py、file_io.py、torchgate/
+├─ rvc_studio_qt.py          ← 本仓库
+├─ rvc_engine.py             ← 本仓库
+├─ audio_diagnostics.py      ← 本仓库
+├─ run.bat                   ← 本仓库（常规启动）
+└─ go-rvc-studio-qt-safe.bat ← 本仓库（安全模式：关闭 CUDA Graph）
 ```
 
 然后运行：
@@ -65,7 +70,7 @@ RVC根目录/
 runtime\pythonw.exe -X utf8 rvc_studio_qt.py
 ```
 
-或者双击 `run.bat`。
+或者双击 `run.bat`（排查 CUDA Graph 问题可双击 `go-rvc-studio-qt-safe.bat`）。
 
 ## 使用
 

@@ -13,12 +13,20 @@ import time
 import numpy as np
 
 
+def _to_mono_1d(arr):
+    a = np.asarray(arr, dtype=np.float32)
+    if a.ndim >= 2:
+        a = a[:, 0]
+    return a.reshape(-1)
+
+
 class AudioDiagnostics:
     def __init__(self, sample_rate=48000):
         self.sample_rate = int(sample_rate)
         self.reset()
 
     def reset(self):
+        self._recording = False
         self.blocks = 0
         self.in_samples = 0
         self.out_samples = 0
@@ -35,7 +43,6 @@ class AudioDiagnostics:
         self.f0_valid = 0
         self.f0_total = 0
         self.f0_values = []
-        self._recording = False
         self._rec_started = 0.0
         self._rec_max_seconds = 60.0
         self._rec_in = []
@@ -45,8 +52,8 @@ class AudioDiagnostics:
     # ---------- 回调侧 ----------
     def feed(self, indata, outdata, f0=None):
         try:
-            inp = np.asarray(indata, dtype=np.float32).reshape(-1)
-            out = np.asarray(outdata, dtype=np.float32).reshape(-1)
+            inp = _to_mono_1d(indata)
+            out = _to_mono_1d(outdata)
         except Exception:
             return
         if inp.size:
@@ -145,9 +152,7 @@ class AudioDiagnostics:
 
     # ---------- 录制 ----------
     def start_recording(self, max_seconds=60.0):
-        self._rec_in = []
-        self._rec_out = []
-        self._rec_frames = 0
+        self.reset()
         self._rec_started = time.time()
         self._rec_max_seconds = float(max_seconds)
         self._recording = True

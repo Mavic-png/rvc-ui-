@@ -23,9 +23,11 @@ logs/
 *.ogg
 *.m4a
 
-# 本机配置
+# 本机配置与诊断产物
 configs/config.json
 rvc_studio_qt_settings.json
+diagnostics/
+*.bak
 
 # 打包
 build/
